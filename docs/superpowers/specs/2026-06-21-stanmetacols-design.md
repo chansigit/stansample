@@ -9,8 +9,16 @@ generalized to multi-role metadata-column identification.
 Given an AnnData `.obs` table (or a bare pandas DataFrame), identify, for each of
 a fixed set of **metadata roles**, which `.obs` column best fills that role. The
 tool **ranks** candidates per role; it does not decide. Same dual-path design as
-`stansample`: a single structured LLM call over a deterministic digest, with a
+`stansample`: a structured LLM pass over a deterministic digest, with a
 deterministic offline heuristic fallback over the same digest.
+
+The LLM path is **two-stage** (new in this version): a single holistic call ranks
+every role, then — when a *numeric* role still has two or more close, high-scoring
+candidates — one focused **adjudication** call decides which column is the
+canonical one for that role. This catches the common case where
+`sc.pp.calculate_qc_metrics` emits look-alike columns (`total_counts`,
+`total_counts_mt`, `total_counts_hb`, …) that a single pass might not fully
+disambiguate.
 
 This is a rename (`stansample` → `stanmetacols`) plus a generalization from one
 target (`sample`) to six roles.
@@ -44,18 +52,21 @@ src/stanmetacols/
   __init__.py      exports rank_meta_columns, profile_obs, Candidate,
                    MetaColsResult, ROLES, LLMUnavailable, __version__
   roles.py    NEW  Role registry: alias/token rules + numeric value checks
-  schema.py        dataclasses + Pydantic output schema (Candidate gains `role`;
-                   RankResult → MetaColsResult)
+  schema.py        dataclasses + Pydantic schemas (Candidate gains `role`;
+                   RankResult → MetaColsResult; RankedCandidates + Adjudications)
   profile.py       digest builder; ColumnProfile gains numeric value stats
   prompts.py       multi-role system prompt + per-role hints + user prompt
   heuristic.py     per-role deterministic scorer (grouping vs numeric)
-  llm.py           single structured call (anthropic | openai), grouped by role
+  llm.py           stage 1: holistic ranking call (anthropic | openai);
+                   stage 2: focused numeric adjudication call
   rank.py          orchestrator: rank_meta_columns(...)
   __main__.py      CLI: JSON-only, --roles filter
 ```
 
-Pipeline unchanged in spirit: **profile → rank (LLM or heuristic) → group by role
-→ report**. One digest is built once and scored for every requested role.
+Pipeline: **profile → rank → adjudicate (numeric, LLM only) → group by role →
+report**. One digest is built once and scored for every requested role. The
+adjudication stage runs only on the LLM path and only for numeric roles that
+remain ambiguous after stage 1 (Section 7.2).
 
 ## 4. Role registry (`roles.py`)
 
@@ -180,14 +191,17 @@ guards against name false-positives.
 
 ## 7. LLM path (`llm.py`)
 
-One structured call over the digest returns candidates for **all** requested
-roles (one call, not one per role). Provider abstraction is preserved verbatim:
-`provider="anthropic"` (native `messages.parse`) or `provider="openai"` (any
-OpenAI-compatible `/chat/completions`, JSON parsed against the schema). Same
-lazy imports, same `base_url`/`api_key` handling, same tolerant JSON parsing
-(`_extract_json`/`_parse_ranked`).
+Two stages. Stage 1 always runs on the LLM path; stage 2 runs only when stage 1
+leaves a numeric role ambiguous. Provider abstraction is preserved verbatim for
+both calls: `provider="anthropic"` (native `messages.parse`) or
+`provider="openai"` (any OpenAI-compatible `/chat/completions`, JSON parsed
+against the schema). Same lazy imports, same `base_url`/`api_key` handling, same
+tolerant JSON parsing (`_extract_json`/`_parse_ranked`).
 
-Output schema (Pydantic):
+### 7.1 Stage 1 — holistic ranking
+
+One structured call over the digest returns candidates for **all** requested
+roles (one call, not one per role).
 
 ```python
 class RankedCandidate(BaseModel):
@@ -204,8 +218,42 @@ Post-processing guard (both backends): drop any candidate whose `role` is not a
 requested role, or whose `column` is not a valid label in the digest
 (hallucination guard); clip score to `[0,1]`; `kind` is taken from the digest
 (`single`/`composite`/`barcode`; numeric columns are `single`); group by role;
-sort each role descending. Any failure raises `LLMUnavailable` → heuristic
-fallback (same as today).
+sort each role descending. Any stage-1 failure raises `LLMUnavailable` →
+heuristic fallback (same as today), and stage 2 does not run.
+
+### 7.2 Stage 2 — numeric adjudication
+
+After stage 1, a numeric role is **ambiguous** when it has ≥2 candidates whose
+top-two score gap is `≤ Δ` (`Δ = 0.15`). Its **contention set** is every
+candidate within `Δ` of that role's top score. If no numeric role is ambiguous,
+stage 2 is skipped (total LLM calls = 1).
+
+Otherwise **one** focused call adjudicates all ambiguous numeric roles at once.
+The prompt gives, per ambiguous role: the role's intent and expected value shape,
+and each contention-set column with its value stats from the digest
+(`v_min/v_max/v_median`, `frac_unit`, `is_integer_valued`, …). The model picks
+the single canonical column per role.
+
+```python
+class Adjudication(BaseModel):
+    role: str        # one of the ambiguous roles
+    column: str      # must be in that role's contention set
+    reason: str
+
+class Adjudications(BaseModel):
+    verdicts: List[Adjudication]
+```
+
+Apply: for each verdict whose `column` is in the offered contention set, move that
+column to rank 1 of its role and replace its `reason` with the adjudication
+reason; leave the rest of the order intact. A verdict naming a column outside the
+contention set is ignored. **Stage 2 is non-fatal:** if the adjudication call
+fails or returns nothing usable, keep the stage-1 ranking unchanged (do not fall
+back to the heuristic — stage 1 already succeeded).
+
+Adjudication is **numeric-only** (the user's concern; the `sample` grouping role
+keeps its stage-1 ranking) and runs only on the LLM path — `--no-llm` and the
+heuristic fallback never adjudicate.
 
 ## 8. Output schema
 
@@ -224,7 +272,9 @@ class Candidate:
 @dataclass
 class MetaColsResult:
     roles: dict      # role_key -> list[Candidate] (sorted desc, truncated to top_k)
-    method: str      # "llm (anthropic)" | "llm (openai)" | "heuristic" | "heuristic (llm unavailable: …)"
+    method: str      # "llm (anthropic)" | "llm (openai)" | "heuristic" |
+                     # "heuristic (llm unavailable: …)"; when stage-2 ran, the llm
+                     # form gains " + adjudication", e.g. "llm (openai) + adjudication"
     digest: ObsDigest
     def top(self, role: str) -> Candidate | None: ...
 ```
@@ -266,12 +316,14 @@ with a stderr message). Exit codes: `0` at least one candidate across all roles,
 ## 10. Public API
 
 ```python
-rank_meta_columns(data, *, roles=None, use_llm=True, provider="anthropic",
-                  model="claude-opus-4-8", client=None, base_url=None,
-                  api_key=None, top_k=5) -> MetaColsResult
+rank_meta_columns(data, *, roles=None, use_llm=True, adjudicate=True,
+                  provider="anthropic", model="claude-opus-4-8", client=None,
+                  base_url=None, api_key=None, top_k=5) -> MetaColsResult
 ```
 
-`roles=None` ⇒ all six. Never mutates input; writes no files.
+`roles=None` ⇒ all six. `adjudicate=True` enables stage 2 (no effect when
+`use_llm=False` or stage 1 fails); exposed mainly so tests can isolate stage 1.
+Never mutates input; writes no files.
 
 ## 11. Rename mechanics
 
@@ -300,16 +352,23 @@ pattern (`client=` stubs for both providers).
   `pct_counts_mt`, `pct_counts_hb`, `total_counts`, `n_genes_by_counts`,
   `doublet_score`: each role's top candidate is the right column; a `[0,1]`
   `pct_counts` does not win `n_counts`.
-- `test_llm.py` — multi-role parse + role/column hallucination filtering, for
-  both anthropic and openai stubs.
+- `test_llm.py` — stage-1 multi-role parse + role/column hallucination filtering,
+  for both anthropic and openai stubs; stage-2 adjudication: a verdict reorders
+  the role's candidates, an out-of-contention verdict is ignored, an adjudication
+  failure leaves the stage-1 ranking intact.
 - `test_rank.py` — `rank_meta_columns` grouping by role, `--roles` subset,
-  LLM-failure fallback, top_k truncation, input-not-mutated.
+  LLM-failure fallback, top_k truncation, input-not-mutated; ambiguity trigger
+  (a numeric role with two close candidates fires stage 2; a clear winner does
+  not — `adjudicate=False` isolates stage 1); `method` gains `+ adjudication`
+  when stage 2 runs.
 - `test_cli.py` — JSON shape `{method, roles:{…}}`, `--roles`, exit codes.
 
 ## 13. Success criteria
 
 - On a synthetic `.obs` with all six columns present, both `--no-llm` and the LLM
   path put the correct column first for every role.
+- With look-alike numeric columns present (`total_counts` + `total_counts_mt`),
+  the LLM path fires stage-2 adjudication and ranks the canonical column first.
 - Roles with no matching column return `[]`, not a wrong guess.
 - `pct_*` detection respects the `[0,1]` convention; a mis-scaled `[0,100]`
   column degrades gracefully (name can still surface it, lower value score).
