@@ -1539,7 +1539,221 @@ git commit -m "feat: stage-2 numeric adjudication (focused LLM tie-break, non-fa
 
 ---
 
-## Task 7: Documentation rewrite (README + formulation)
+## Task 7: User guidance hint (`--hint`)
+
+**Files:**
+- Modify: `src/stanmetacols/prompts.py`
+- Modify: `src/stanmetacols/llm.py`
+- Modify: `src/stanmetacols/rank.py`
+- Modify: `src/stanmetacols/__main__.py`
+- Test: `tests/test_prompts.py`, `tests/test_llm.py`, `tests/test_cli.py`
+
+**Interfaces:**
+- Consumes: `build_user_prompt(digest, roles)`, `build_adjudication_prompt(digest, contention)`, `rank_with_llm(digest, roles, ...)`, `adjudicate_numeric(digest, contention, ...)`, `rank_meta_columns(...)`.
+- Produces: an optional free-text `hint: str = ""` threaded through `rank_meta_columns` → `rank_with_llm` AND `adjudicate_numeric` → the LLM prompts. `build_user_prompt(digest, roles, hint="")` and `build_adjudication_prompt(digest, contention, hint="")` gain a trailing `hint` parameter. CLI gains `--hint` (default `""`). The hint is LLM-only: NO effect on `--no-llm` / the heuristic fallback (silently ignored). Default `""` ⇒ byte-identical prompts to before.
+
+Rationale: when both the heuristic and the LLM miss a column, the user steers the LLM at runtime (e.g. "the mito fraction column is named `mt.frac`"). The hint is injected as an authoritative block at the TOP of the LLM user prompt so the model weights it heavily.
+
+- [ ] **Step 1: Write the failing prompt tests**
+
+Add to `tests/test_prompts.py`:
+
+```python
+import pandas as pd
+from stanmetacols.profile import profile_obs
+from stanmetacols.prompts import build_user_prompt, build_adjudication_prompt
+
+
+def _d():
+    return profile_obs(pd.DataFrame({"sample": ["A", "B"]}))
+
+
+def test_user_prompt_includes_hint_block():
+    p = build_user_prompt(_d(), ["sample"], hint="mito col is mt.frac")
+    assert "User guidance" in p
+    assert "mito col is mt.frac" in p
+
+
+def test_user_prompt_omits_block_when_hint_empty():
+    p = build_user_prompt(_d(), ["sample"])
+    assert "User guidance" not in p
+
+
+def test_adjudication_prompt_includes_hint():
+    p = build_adjudication_prompt(_d(), {}, hint="counts are in total_umis")
+    assert "User guidance" in p and "total_umis" in p
+```
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `/scratch/users/chensj16/venvs/dl2025/.venv/bin/python -m pytest tests/test_prompts.py -q`
+Expected: FAIL — `build_user_prompt()`/`build_adjudication_prompt()` got an unexpected keyword argument `hint`.
+
+- [ ] **Step 3: Add the hint block to `prompts.py`**
+
+```python
+def _hint_block(hint: str) -> str:
+    hint = (hint or "").strip()
+    if not hint:
+        return ""
+    return ("User guidance (authoritative — follow this to locate the columns):\n"
+            + hint + "\n\n")
+
+
+def build_user_prompt(digest: ObsDigest, roles, hint: str = "") -> str:
+    return (
+        _hint_block(hint)
+        + "Requested roles: " + ", ".join(roles) + "\n\n"
+        "Here is the .obs digest (JSON):\n\n"
+        + json.dumps(digest.to_prompt_dict(), sort_keys=True, indent=2)
+        + "\n\nRank the columns that fill each requested role."
+    )
+```
+
+And in `build_adjudication_prompt`, add the `hint` param and prepend the block to its returned string:
+
+```python
+def build_adjudication_prompt(digest: ObsDigest, contention, hint: str = "") -> str:
+    # contention: dict[role_key -> list[Candidate]]
+    by_col = {c.name: c for c in digest.columns}
+    blocks = []
+    for role, cands in contention.items():
+        lines = [f"Role {role} — candidates:"]
+        for cand in cands:
+            p = by_col.get(cand.column)
+            stats = ("" if p is None else
+                     f" [v_min={p.v_min:.3g}, v_max={p.v_max:.3g}, "
+                     f"v_median={p.v_median:.3g}, frac_unit={p.frac_unit:.2f}, "
+                     f"is_integer_valued={p.is_integer_valued}]")
+            lines.append(f"  - {cand.column}{stats}")
+        blocks.append("\n".join(lines))
+    return (_hint_block(hint) + "Pick the canonical column for each role.\n\n"
+            + "\n\n".join(blocks) + "\n\nReturn one verdict per role.")
+```
+
+- [ ] **Step 4: Run prompt tests to verify pass**
+
+Run: `/scratch/users/chensj16/venvs/dl2025/.venv/bin/python -m pytest tests/test_prompts.py -q`
+Expected: PASS.
+
+- [ ] **Step 5: Write the failing llm-threading test**
+
+Add to `tests/test_llm.py`:
+
+```python
+def test_hint_reaches_user_prompt():
+    parsed = RankedCandidates(candidates=[])
+    client = _StubClient(parsed)
+    rank_with_llm(_digest(), ["sample"], hint="HINTTOKEN", client=client)
+    content = client.messages.kwargs["messages"][0]["content"]
+    assert "HINTTOKEN" in content
+```
+
+(`_StubClient` / `_digest` already exist in `tests/test_llm.py`. `rank_with_llm`'s first positional after `digest` is `roles`.)
+
+- [ ] **Step 6: Run to verify it fails**
+
+Run: `/scratch/users/chensj16/venvs/dl2025/.venv/bin/python -m pytest tests/test_llm.py::test_hint_reaches_user_prompt -q`
+Expected: FAIL — `rank_with_llm()` got an unexpected keyword argument `hint`.
+
+- [ ] **Step 7: Thread `hint` through `llm.py`**
+
+`rank_with_llm` gains `hint`, passes it to the backend callers, which pass it to `build_user_prompt`:
+
+```python
+def rank_with_llm(digest: ObsDigest, roles, *, hint: str = "",
+                  provider: str = "anthropic", model: str = "claude-opus-4-8",
+                  client=None, base_url: str | None = None,
+                  api_key: str | None = None, max_tokens: int = 2048) -> dict:
+    if provider == "anthropic":
+        parsed = _call_anthropic(digest, roles, hint, model, client, max_tokens)
+    elif provider == "openai":
+        parsed = _call_openai(digest, roles, hint, model, client, base_url, api_key, max_tokens)
+    else:
+        raise LLMUnavailable(f"unknown provider: {provider!r}")
+    # ... (post-processing unchanged) ...
+```
+
+`_call_anthropic` / `_call_openai` gain a `hint` parameter (right after `roles`) and call `build_user_prompt(digest, roles, hint)` instead of `build_user_prompt(digest, roles)`.
+
+`adjudicate_numeric` gains `hint` and passes it into the prompt builder:
+
+```python
+def adjudicate_numeric(digest, contention, *, hint: str = "",
+                       provider: str = "anthropic", model: str = "claude-opus-4-8",
+                       client=None, base_url: str | None = None,
+                       api_key: str | None = None, max_tokens: int = 1024) -> dict:
+    prompt = build_adjudication_prompt(digest, contention, hint)
+    # ... (rest unchanged) ...
+```
+
+- [ ] **Step 8: Run to verify the llm test passes**
+
+Run: `/scratch/users/chensj16/venvs/dl2025/.venv/bin/python -m pytest tests/test_llm.py -q`
+Expected: PASS.
+
+- [ ] **Step 9: Thread `hint` through `rank_meta_columns` (`rank.py`)**
+
+Add `hint: str = ""` to the signature (after `adjudicate`), and pass it to both LLM calls:
+
+```python
+def rank_meta_columns(data, *, roles=None, use_llm: bool = True,
+                      adjudicate: bool = True, hint: str = "",
+                      provider: str = "anthropic", model: str = "claude-opus-4-8",
+                      client=None, base_url: str | None = None,
+                      api_key: str | None = None, top_k: int | None = 5) -> MetaColsResult:
+    ...
+    ranked = rank_with_llm(digest, role_keys, hint=hint, provider=provider,
+                           model=model, client=client, base_url=base_url, api_key=api_key)
+    ...
+    verdicts = adjudicate_numeric(digest, amb, hint=hint, provider=provider,
+                                  model=model, client=client, base_url=base_url, api_key=api_key)
+```
+
+(The heuristic branch ignores `hint` — that is the spec'd "LLM-only" behavior.)
+
+- [ ] **Step 10: Add `--hint` to the CLI and write the CLI test**
+
+In `src/stanmetacols/__main__.py`, add the argument and pass it through:
+
+```python
+    parser.add_argument("--hint", default="",
+                        help="optional free-text guidance for the LLM to locate "
+                             "columns (LLM path only; ignored with --no-llm)")
+```
+
+and in the `rank_meta_columns(...)` call add `hint=args.hint`.
+
+Add to `tests/test_cli.py`:
+
+```python
+def test_cli_hint_accepted_offline(tmp_path, capsys):
+    p = tmp_path / "h.h5ad"
+    obs = pd.DataFrame({"sample": ["S1"] * 5 + ["S2"] * 5})
+    _write(p, obs, [f"c{i}" for i in range(10)])
+    code = main([str(p), "--no-llm", "--hint", "ignore me offline"])
+    assert code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["roles"]["sample"][0]["column"] == "sample"
+```
+
+(`_write` is the helper already defined in `tests/test_cli.py`.)
+
+- [ ] **Step 11: Run the full suite**
+
+Run: `/scratch/users/chensj16/venvs/dl2025/.venv/bin/python -m pytest -q`
+Expected: PASS (55 + 5 new = 60).
+
+- [ ] **Step 12: Commit**
+
+```bash
+git add src/stanmetacols/prompts.py src/stanmetacols/llm.py src/stanmetacols/rank.py src/stanmetacols/__main__.py tests/
+git commit -m "feat: --hint user guidance threaded into both LLM calls (LLM-only, default empty)"
+```
+
+---
+
+## Task 8: Documentation rewrite (README + formulation)
 
 **Files:**
 - Modify: `README.md`
