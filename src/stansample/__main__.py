@@ -1,4 +1,8 @@
-"""CLI: rank the sample column(s) of an .h5ad file."""
+"""CLI: rank the sample column(s) of an .h5ad file.
+
+stdout always carries a single JSON object: {"method": ..., "candidates": [...]}.
+On an IO error a diagnostic line is written to stderr and the exit code is 1.
+"""
 
 import argparse
 import json
@@ -11,13 +15,13 @@ from .rank import rank_sample_columns
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="stansample",
-        description="Rank which .obs column identifies the sample each cell came from.")
+        description="Rank which .obs column identifies the sample each cell came "
+                    "from. Emits a JSON object on stdout.")
     parser.add_argument("path", help="path to an .h5ad file")
     parser.add_argument("--no-llm", action="store_true",
                         help="force the offline heuristic ranker (no API call)")
     parser.add_argument("--top", type=int, default=5,
-                        help="show top K candidates (default 5; 0 = all)")
-    parser.add_argument("--json", action="store_true", help="emit JSON")
+                        help="keep top K candidates (default 5; 0 = all)")
     parser.add_argument("--model", default="claude-opus-4-8",
                         help="LLM model id (default claude-opus-4-8)")
     args = parser.parse_args(argv)
@@ -32,16 +36,9 @@ def main(argv=None) -> int:
     result = rank_sample_columns(
         adata, use_llm=not args.no_llm, model=args.model, top_k=args.top)
 
-    if args.json:
-        print(json.dumps(
-            {"method": result.method,
-             "candidates": [asdict(c) for c in result.candidates]}, indent=2))
-    else:
-        print(f"method: {result.method}")
-        if not result.candidates:
-            print("  (no plausible sample column found)")
-        for c in result.candidates:
-            print(f"  {c.score:.2f}  [{c.kind}/{c.source}]  {c.column}  — {c.reason}")
+    print(json.dumps(
+        {"method": result.method,
+         "candidates": [asdict(c) for c in result.candidates]}, indent=2))
 
     return 0 if result.candidates else 2
 
