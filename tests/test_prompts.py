@@ -32,7 +32,12 @@ def test_adjudication_prompt_includes_hint():
 
 def test_prompts_discriminate_organ_and_tissue():
     sp = SYSTEM_PROMPT.lower()
-    assert "organ" in sp and "tissue" in sp
-    # the discrimination guidance, not just the roles-block listing
-    assert "anatomical organ" in sp
-    assert "sampled" in sp and "material" in sp
+    # phrases that exist ONLY in the discrimination paragraph, not the roles block
+    assert "for the organ and tissue roles" in sp
+    assert "they are distinct" in sp
+    assert "organ, tissue, both, or neither" in sp
+    # ordering: the paragraph sits between the cell-type guidance and the JSON instruction
+    ct_end = sp.index("both, one, or neither.")
+    disc = sp.index("they are distinct")
+    json_start = sp.index("return json only")
+    assert ct_end < disc < json_start
