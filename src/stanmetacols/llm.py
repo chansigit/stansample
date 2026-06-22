@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import json
 
-from .schema import ObsDigest, Candidate, RankedCandidates, LLMUnavailable
-from .prompts import SYSTEM_PROMPT, build_user_prompt
+from .schema import ObsDigest, Candidate, RankedCandidates, Adjudications, LLMUnavailable
+from .prompts import (SYSTEM_PROMPT, build_user_prompt,
+                      ADJUDICATION_SYSTEM_PROMPT, build_adjudication_prompt)
 
 
 def _valid_labels(digest: ObsDigest) -> dict:
@@ -129,6 +130,89 @@ def _call_openai(digest: ObsDigest, roles, model: str, client, base_url, api_key
     except Exception as exc:
         raise LLMUnavailable(f"unexpected response shape: {exc}") from exc
     return _parse_ranked(text)
+
+
+def _call_anthropic_adjudication(prompt, model, client, max_tokens) -> Adjudications:
+    if client is None:
+        try:
+            import anthropic
+        except Exception as exc:
+            raise LLMUnavailable(f"anthropic not installed: {exc}") from exc
+        try:
+            client = anthropic.Anthropic()
+        except Exception as exc:
+            raise LLMUnavailable(f"cannot construct client: {exc}") from exc
+    try:
+        resp = client.messages.parse(
+            model=model, max_tokens=max_tokens,
+            system=ADJUDICATION_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
+            output_format=Adjudications)
+    except Exception as exc:
+        raise LLMUnavailable(str(exc)) from exc
+    parsed = getattr(resp, "parsed_output", None)
+    if parsed is None:
+        raise LLMUnavailable("adjudication returned no parseable output")
+    return parsed
+
+
+def _call_openai_adjudication(prompt, model, client, base_url, api_key, max_tokens) -> Adjudications:
+    if client is None:
+        try:
+            from openai import OpenAI
+        except Exception as exc:
+            raise LLMUnavailable(f"openai not installed: {exc}") from exc
+        kwargs = {}
+        if base_url:
+            kwargs["base_url"] = base_url
+        if api_key:
+            kwargs["api_key"] = api_key
+        try:
+            client = OpenAI(**kwargs)
+        except Exception as exc:
+            raise LLMUnavailable(f"cannot construct client: {exc}") from exc
+    try:
+        resp = client.chat.completions.create(
+            model=model, max_tokens=max_tokens,
+            messages=[{"role": "system", "content": ADJUDICATION_SYSTEM_PROMPT},
+                      {"role": "user", "content": prompt}])
+    except Exception as exc:
+        raise LLMUnavailable(str(exc)) from exc
+    try:
+        text = resp.choices[0].message.content
+    except Exception as exc:
+        raise LLMUnavailable(f"unexpected response shape: {exc}") from exc
+    blob = _extract_json(text)
+    try:
+        import json as _json
+        data = _json.loads(blob)
+    except Exception as exc:
+        raise LLMUnavailable(f"adjudication is not valid JSON: {exc}") from exc
+    if isinstance(data, list):
+        data = {"verdicts": data}
+    try:
+        return Adjudications.model_validate(data)
+    except Exception as exc:
+        raise LLMUnavailable(f"adjudication does not match schema: {exc}") from exc
+
+
+def adjudicate_numeric(digest, contention, *, provider: str = "anthropic",
+                       model: str = "claude-opus-4-8", client=None,
+                       base_url: str | None = None, api_key: str | None = None,
+                       max_tokens: int = 1024) -> dict:
+    prompt = build_adjudication_prompt(digest, contention)
+    if provider == "anthropic":
+        parsed = _call_anthropic_adjudication(prompt, model, client, max_tokens)
+    elif provider == "openai":
+        parsed = _call_openai_adjudication(prompt, model, client, base_url, api_key, max_tokens)
+    else:
+        raise LLMUnavailable(f"unknown provider: {provider!r}")
+    offered = {role: {c.column for c in cands} for role, cands in contention.items()}
+    verdicts = {}
+    for v in parsed.verdicts:
+        if v.role in offered and v.column in offered[v.role]:
+            verdicts[v.role] = (v.column, v.reason)
+    return verdicts
 
 
 def rank_with_llm(digest: ObsDigest, roles, *, provider: str = "anthropic",
