@@ -184,8 +184,7 @@ def _call_openai_adjudication(prompt, model, client, base_url, api_key, max_toke
         raise LLMUnavailable(f"unexpected response shape: {exc}") from exc
     blob = _extract_json(text)
     try:
-        import json as _json
-        data = _json.loads(blob)
+        data = json.loads(blob)
     except Exception as exc:
         raise LLMUnavailable(f"adjudication is not valid JSON: {exc}") from exc
     if isinstance(data, list):

@@ -91,9 +91,9 @@ def _ambiguous_obs():
 
 def test_adjudication_reorders_numeric_role():
     stage1 = RankedCandidates(candidates=[
-        {"role": "n_counts", "column": "total_counts", "kind": "single",
-         "score": 0.80, "reason": "looks like counts"},
         {"role": "n_counts", "column": "total_counts_mt", "kind": "single",
+         "score": 0.80, "reason": "looks like counts"},
+        {"role": "n_counts", "column": "total_counts", "kind": "single",
          "score": 0.78, "reason": "also counts-like"}])
     stage2 = Adjudications(verdicts=[
         {"role": "n_counts", "column": "total_counts",
