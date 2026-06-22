@@ -55,3 +55,29 @@ def test_empty_obs():
     d = profile_obs(pd.DataFrame())
     assert d.n_obs == 0
     assert d.columns == []
+
+
+def test_numeric_stats_unit_float():
+    obs = pd.DataFrame({"pct": [0.0, 0.1, 0.2, 0.9, 1.0]})
+    col = profile_obs(obs).columns[0]
+    assert col.is_numeric is True
+    assert col.is_integer_valued is False
+    assert col.frac_unit == 1.0
+    assert col.frac_nonneg == 1.0
+    assert col.v_min == 0.0 and col.v_max == 1.0
+
+
+def test_numeric_stats_integer_counts():
+    obs = pd.DataFrame({"total_counts": [1000, 2000, 3000, 50000]})
+    col = profile_obs(obs).columns[0]
+    assert col.is_numeric is True
+    assert col.is_integer_valued is True
+    assert col.frac_unit == 0.0           # none in [0,1]
+    assert col.v_median == 2500.0
+
+
+def test_numeric_stats_absent_for_categorical():
+    obs = pd.DataFrame({"sample": ["A", "B", "A", "B"]})
+    col = profile_obs(obs).columns[0]
+    assert col.is_numeric is False
+    assert col.frac_unit == 0.0 and col.is_integer_valued is False

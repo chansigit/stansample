@@ -44,9 +44,22 @@ def _profile_column(name: str, s: pd.Series, n_obs: int, max_example_values: int
     example_values = sorted(str(v) for v in vc.index)[:max_example_values]
     sample = [str(v) for v in vc.index[:1000]]
     frac_bc = (sum(1 for v in sample if _BARCODE_RE.match(v)) / len(sample)) if sample else 0.0
+    dtype = _classify_dtype(s)
+    is_numeric = dtype in ("integer", "float", "bool")
+    v_min = v_max = v_median = v_mean = frac_nonneg = frac_unit = 0.0
+    is_integer_valued = False
+    if is_numeric:
+        vals = pd.to_numeric(s, errors="coerce").to_numpy(dtype="float64")
+        vals = vals[~np.isnan(vals)]
+        if vals.size:
+            v_min = float(vals.min()); v_max = float(vals.max())
+            v_median = float(np.median(vals)); v_mean = float(vals.mean())
+            frac_nonneg = float((vals >= 0).mean())
+            frac_unit = float(((vals >= 0.0) & (vals <= 1.0)).mean())
+            is_integer_valued = bool(np.all(vals == np.round(vals)))
     return ColumnProfile(
         name=name,
-        dtype=_classify_dtype(s),
+        dtype=dtype,
         n_unique=n_unique,
         n_missing=n_missing,
         example_values=example_values,
@@ -55,6 +68,10 @@ def _profile_column(name: str, s: pd.Series, n_obs: int, max_example_values: int
         unique_per_cell=(n_obs > 0 and n_unique == n_obs),
         single_value=(n_unique <= 1),
         looks_like_barcode=(frac_bc > 0.5),
+        is_numeric=is_numeric,
+        v_min=v_min, v_max=v_max, v_median=v_median, v_mean=v_mean,
+        frac_nonneg=frac_nonneg, frac_unit=frac_unit,
+        is_integer_valued=is_integer_valued,
     )
 
 

@@ -25,6 +25,14 @@ class ColumnProfile:
     unique_per_cell: bool
     single_value: bool
     looks_like_barcode: bool
+    is_numeric: bool = False
+    v_min: float = 0.0
+    v_max: float = 0.0
+    v_median: float = 0.0
+    v_mean: float = 0.0
+    frac_nonneg: float = 0.0
+    frac_unit: float = 0.0          # fraction of non-missing values in [0,1]
+    is_integer_valued: bool = False
 
 
 @dataclass
