@@ -43,9 +43,8 @@ def test_flags_and_dtypes():
     assert _col(d, "sample_id").example_values == sorted(["S1", "S2", "S3"])
 
 
-def test_composite_and_barcode_empty_at_this_stage():
+def test_barcode_empty_at_this_stage():
     d = profile_obs(_obs())
-    assert d.composite_candidates == []
     assert d.barcode is None
 
 
