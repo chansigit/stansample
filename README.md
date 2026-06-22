@@ -95,6 +95,10 @@ Never mutates the input; writes no files.
 
 ## How it works
 
+For the precise math — partition statistics, eligibility predicates, and the
+exact scoring formulas — see [`docs/formulation.md`](docs/formulation.md). This
+section is the prose tour.
+
 The pipeline is **profile → rank → fall back → report**. A single deterministic
 *digest* of `.obs` is built once, then handed to one of two interchangeable
 rankers. The LLM never sees raw cell data — only the compact digest — so the
