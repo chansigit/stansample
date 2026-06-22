@@ -1,7 +1,8 @@
 # stanmetacols — algorithm formulation
 
 A precise statement of what the code computes. Every symbol below maps to a
-named quantity in `profile.py`, `heuristic.py`, `llm.py`, or `rank.py`.
+named quantity in `profile.py`, `heuristic.py`, `llm.py`, `roles.py`, or
+`rank.py`.
 
 GitHub renders the math inline. If you read this in a plain editor, the `$…$`
 spans are LaTeX.
@@ -11,25 +12,24 @@ spans are LaTeX.
 ## 1. Problem
 
 The input is an `.obs` table: $n$ cells (rows), a set of columns $\mathcal{C}$,
-and a list of cell names (`obs_names`) $b_1,\dots,b_n$. We want to **rank
-candidate partitions** of the $n$ cells, where each candidate is a plausible way
-to assign every cell to the *sample* it came from — the grouping unit used for
-per-sample QC, batch grouping, or pseudobulk.
+and a list of cell names (`obs_names`) $b_1,\dots,b_n$. We want to **identify
+and rank candidate columns** for each of 8 standard metadata roles.
 
-A candidate induces a partition
+A role is either:
+
+- a **grouping** role (`sample`) — assigns each cell to the sample it came from;
+- a **numeric** role (`pct_mt`, `pct_hb`, `doublet_score`, `n_counts`,
+  `n_genes`) — carries a per-cell numeric QC measurement;
+- a **cell-type** role (`cell_type_coarse`, `cell_type_fine`) — carries a
+  per-cell label string.
+
+For the grouping role, a candidate induces a partition
 
 $$P=\{G_1,\dots,G_k\},\qquad \textstyle\bigsqcup_i G_i \subseteq \{1,\dots,n\},\quad G_i\neq\varnothing,$$
 
-with group sizes $g_i=|G_i|$. The tool **scores and ranks** candidates; it never
+with group sizes $g_i=|G_i|$. Numeric and cell-type roles only admit single
+columns (kind `"single"`). The tool **scores and ranks** candidates; it never
 commits to one.
-
-There are three candidate families:
-
-| Family | Partition rule |
-|---|---|
-| **single** column $c$ | cells grouped by the distinct values of $c$ |
-| **composite** key $\{a,b\}$ | cells grouped by distinct value-*pairs* of $(a,b)$ |
-| **barcode** | groups extracted from `obs_names` by a delimiter + position rule |
 
 ---
 
@@ -38,11 +38,10 @@ There are three candidate families:
 For any partition $P$ with group sizes $g_1,\dots,g_k$ ($k=|P|$ nonempty
 groups), define the **cardinality** $k$ and the **balance**
 
-$$\beta(P)=\frac{\min_i g_i}{\max_i g_i}\in(0,1],\qquad \beta:=0 \text{ if } \max_i g_i=0 .$$
+$$\beta(P)=\frac{\min_i g_i}{\max_i g_i}\in(0,1],\qquad \beta:=0 \text{ if } \max_i g_i=0.$$
 
 $\beta=1$ is a perfectly even split; $\beta\to 0$ is one dominant group plus
-slivers. (`_group_stats` also returns $\min$, $\max$, and the median group size,
-carried in the digest for the prompt but not used by the scorer.)
+slivers.
 
 ---
 
@@ -72,15 +71,28 @@ pattern
 
 $$R=\texttt{\textasciicircum[ACGTN]\{8,\}(-\textbackslash d+)?\$}\quad(\text{case-insensitive}).$$
 
+**Numeric value stats.** For numeric columns (`is_numeric=True`), `profile.py`
+additionally computes:
+
+| Stat | Meaning |
+|---|---|
+| `v_min`, `v_max`, `v_median`, `v_mean` | value range and central tendency |
+| `frac_nonneg` | fraction of non-missing values that are $\ge 0$ |
+| `frac_unit` | fraction of non-missing values in $[0,1]$ |
+| `is_integer_valued` | `True` if all non-missing values are integers (int dtype or float with no fractional part) |
+
+These stats are carried in the digest and used by both the numeric heuristic
+scorer and the LLM prompts.
+
 ---
 
-## 4. Candidate families
+## 4. Candidate families (grouping role only)
 
 ### 4.1 Single columns
 
 Every column is profiled. A column is a scorable single candidate iff
 $\neg\,\mathrm{single}_c \wedge \neg\,\mathrm{unique}_c$ (Section 5 then scores it
-and may still drop it).
+and may still drop it). Numeric and cell-type roles only use single columns.
 
 ### 4.2 Composite keys
 
@@ -96,7 +108,7 @@ $O(k^2)$ pair enumeration). For each unordered pair $\{a,b\}$ form the joint
 partition (`groupby([a,b])`, nonempty cells only); let $u_{ab}$ be its number of
 groups and $\beta_{ab}$ its balance. **Keep** the pair iff
 
-$$2\le u_{ab}<n .$$
+$$2\le u_{ab}<n.$$
 
 Rank kept pairs by $\beta_{ab}$ descending; keep the top $8$. The label of a kept
 pair is the string `"a + b"`.
@@ -108,12 +120,12 @@ $\mathrm{frac}(\cdot)$ denote the fraction of names satisfying a predicate.
 
 $$\textbf{prefix on }\verb|_| :\quad
 \text{applicable if } \mathrm{frac}(\verb|_|\in b_i)>0.9,\quad
-\text{key}(b_i)=b_i\ \text{before its last }\verb|_| .$$
+\text{key}(b_i)=b_i\ \text{before its last }\verb|_|.$$
 
 $$\textbf{suffix on }\verb|-| :\quad
 t_i=b_i\ \text{after its last }\verb|-|,\quad
 \text{applicable if } \mathrm{frac}(t_i\in\verb|\d+|)>0.9,\quad
-\text{key}(b_i)=t_i .$$
+\text{key}(b_i)=t_i.$$
 
 For each applicable rule build the partition with $k$ groups and **keep** it iff
 $2\le k<n$. Among the kept rules choose the one of **maximum balance** $\beta$.
@@ -123,30 +135,82 @@ Its label is `"<barcode:POSITION:DELIM>"`, e.g. `<barcode:prefix:_>`.
 
 The deterministic output of `profile_obs` is
 
-$$\mathcal{D}=\bigl(n,\ \{\text{column profiles}\},\ \{\text{composite profiles}\},\ \text{barcode profile or }\varnothing\bigr).$$
+$$\mathcal{D}=\bigl(n,\ \{\text{column profiles (incl. numeric stats)}\},\ \{\text{composite profiles}\},\ \text{barcode profile or }\varnothing\bigr).$$
 
 $\mathcal{D}$ is computed without any network or LLM and without mutating the
-input. Both rankers below consume the *same* $\mathcal{D}$.
+input. Both rankers consume the *same* $\mathcal{D}$.
 
 ---
 
-## 5. Heuristic scorer
+## 5. Role registry (name signal and value checks)
 
-Let $\operatorname{clip}(x)=\max\!\bigl(0,\min(1,x)\bigr)$.
+All name matching operates on a **normalized** string: lowercase, strip `_`, `.`,
+and spaces.
 
-**Name signal.** Let $A$ be the alias list — `sample, sample_id, donor,
-donor_id, patient, subject, individual, specimen, orig.ident, library,
-library_id, gsm, geo_accession, srr, batch, channel, well, lane, replicate, …` —
-and let $\nu(s)$ lowercase $s$ and delete `_`, `.`, and spaces. Then
+### 5.1 Name signal
 
-$$\mathrm{name}(c)=
+`name_signal(col, role)` returns a score in $\{0.0, 0.6, 0.8, 1.0\}$:
+
+$$\mathrm{name}(c, r)=
 \begin{cases}
-1.0 & \nu(c)\in\nu(A)\quad(\text{exact alias})\\[2pt]
-0.6 & \exists\,a\in\nu(A):\ a\subseteq\nu(c)\quad(\text{alias substring})\\[2pt]
+1.0 & \nu(c)\in\nu(A_r)\quad(\text{exact alias})\\
+0.8 & \text{any include-token of }r\text{ is a substring of }\nu(c),\\
+    & \quad\wedge\;\text{no exclude-token present,}\\
+    & \quad\wedge\;\text{for pct roles: a measure token is also present}\\
+0.6 & \exists\,a\in\nu(A_r):\ a\subseteq\nu(c) \vee \nu(c)\subseteq a\quad(\text{substring})\\
 0.0 & \text{otherwise.}
 \end{cases}$$
 
-**Cardinality signal.** With the soft ceiling $\theta(n)=\max(50,\,0.2\,n)$,
+Three signal tiers per role type:
+
+| Tier | Value | Condition |
+|---|---|---|
+| Exact alias | 1.0 | normalized name is in the role's alias table |
+| Token rule | 0.8 | include-token substring match (with exclude-token guard; pct roles require a measure word: `pct`, `percent`, `frac`, `fraction`, `proportion`) |
+| Substring | 0.6 | normalized name contains or is contained by any normalized alias |
+
+### 5.2 Numeric value checks
+
+`value_check(profile, role)` returns a score in $[0,1]$ (or 0 if the column is
+not numeric):
+
+| Role | Check | Score |
+|---|---|---|
+| `pct_mt`, `pct_hb`, `doublet_score` | `frac_nonneg ≥ 0.99` **and** `frac_unit ≥ 0.99` **and** not integer-valued | 1.0 |
+| `pct_mt`, `pct_hb`, `doublet_score` | `0.5 ≤ frac_unit < 0.99` (percent-scale, degraded) | 0.3 |
+| `n_counts` | integer-valued, `frac_nonneg ≥ 0.99`, `v_median ≥ 100` | 1.0 |
+| `n_counts` | integer-valued, `frac_nonneg ≥ 0.99`, `v_median < 100` | 0.5 |
+| `n_genes` | integer-valued, `frac_nonneg ≥ 0.99`, `2 ≤ v_median ≤ 20000` | 1.0 |
+| `n_genes` | integer-valued, `frac_nonneg ≥ 0.99`, outside band | 0.5 |
+| any | column is not numeric | 0.0 |
+
+### 5.3 Cell-type vocabulary check
+
+`celltype_value_frac(profile)` scans `profile.example_values` against a
+vocabulary of ~40 cell-type terms (e.g. `epithelial`, `macrophage`, `tcell`,
+`cyte`, `blast`, …) and returns the fraction of example values that contain any
+term. `celltype_name_base(col)` returns `1.0` if the normalized column name
+contains a generic token such as `celltype`, `annotation`, `celllabel`, etc.
+
+---
+
+## 6. Heuristic scorer
+
+Let $\operatorname{clip}(x)=\max\!\bigl(0,\min(1,x)\bigr)$.
+
+### 6.1 Grouping role (`sample`)
+
+**Name signal** — uses the sample-specific alias table directly (same formula as
+§5.1 exact/substring only; no token tier for this role):
+
+$$\mathrm{name}_{\mathrm{grp}}(c)=
+\begin{cases}
+1.0 & \nu(c)\in\nu(A_{\mathrm{sample}})\\
+0.6 & \exists\,a\in\nu(A_{\mathrm{sample}}):\ a\subseteq\nu(c)\\
+0.0 & \text{otherwise.}
+\end{cases}$$
+
+**Cardinality signal.** With soft ceiling $\theta(n)=\max(50,\,0.2\,n)$:
 
 $$\mathrm{card}(u)=
 \begin{cases}
@@ -163,11 +227,11 @@ $$\rho_c = 0.5\cdot\mathbf{1}[\tau_c=\text{float}]
 
 **Scores.** For a single column ($\neg\,\mathrm{single}_c\wedge\neg\,\mathrm{unique}_c$):
 
-$$\boxed{\,s_c=\operatorname{clip}\bigl(0.5\,\mathrm{name}(c)+0.25\,\mathrm{card}(u_c)+0.25\,\beta_c-\rho_c\bigr)\,}$$
+$$\boxed{\,s_c=\operatorname{clip}\bigl(0.5\,\mathrm{name}_{\mathrm{grp}}(c)+0.25\,\mathrm{card}(u_c)+0.25\,\beta_c-\rho_c\bigr)\,}$$
 
 For a composite key $\{a,b\}$, with member-averaged name signal
-$\overline{\mathrm{name}}=\tfrac12\bigl(\mathrm{name}(a)+\mathrm{name}(b)\bigr)$ and a
-$0.85$ discount, **no** penalty term:
+$\overline{\mathrm{name}}=\tfrac12\bigl(\mathrm{name}_{\mathrm{grp}}(a)+\mathrm{name}_{\mathrm{grp}}(b)\bigr)$
+and a $0.85$ discount, **no** penalty term:
 
 $$\boxed{\,s_{ab}=\operatorname{clip}\Bigl(0.85\cdot\bigl(0.5\,\overline{\mathrm{name}}+0.25\,\mathrm{card}(u_{ab})+0.25\,\beta_{ab}\bigr)\Bigr)\,}$$
 
@@ -175,64 +239,147 @@ For the barcode grouping with balance $\beta_{\mathrm{bc}}$:
 
 $$\boxed{\,s_{\mathrm{bc}}=\operatorname{clip}\bigl(0.45\,\beta_{\mathrm{bc}}+0.1\bigr)\,}$$
 
-Any candidate with score $\le 0$ is dropped. The kept candidates, tagged
-$\mathrm{source}=\texttt{heuristic}$, are returned sorted by score descending.
+Any candidate with score $\le 0$ is dropped.
 
-> **Reading the weights.** A single column's score is a convex blend
-> $0.5\,\text{name}+0.25\,\text{card}+0.25\,\text{balance}$ minus disqualifiers:
-> the *name* carries half the weight (a column literally called `sample` wins
-> even when imbalanced), while *cardinality* and *balance* together encode "many
-> groups, far fewer than one per cell, reasonably even." Composites inherit the
-> same blend at a $15\%$ discount; the barcode path is balance-driven with a
-> small floor so a usable grouping never scores exactly zero.
+### 6.2 Numeric roles (`pct_mt`, `pct_hb`, `doublet_score`, `n_counts`, `n_genes`)
+
+A column is considered only if it has a name signal hit ($\mathrm{name}(c,r)>0$).
+The score is:
+
+$$\boxed{\,s_c=\operatorname{clip}\bigl(0.6\,\mathrm{name}(c,r)+0.4\,\mathrm{value}(c,r)\bigr)\,}$$
+
+where $\mathrm{value}(c,r)$ is the value check from §5.2. Columns with
+$\mathrm{name}=0$ are **skipped entirely** (the name acts as a gate: a column
+that does not look like the role at all is never a numeric candidate, regardless
+of its value shape).
+
+### 6.3 Cell-type roles (`cell_type_coarse`, `cell_type_fine`)
+
+Only categorical or string columns that are neither single-valued nor
+unique-per-cell are considered.
+
+**Name score** combines the role-specific alias signal and the generic cell-type
+name signal:
+
+$$\mathrm{name\_score}(c,r)=\max\!\bigl(\mathrm{name}(c,r),\ 0.6\cdot\mathrm{celltype\_name\_base}(c)\bigr).$$
+
+A column is **admitted** if $\mathrm{name\_score}>0 \vee \mathrm{vocab}(c)\ge 0.5$
+(the value vocabulary scan can carry a column whose name is uninformative).
+
+**Cardinality fit.** Expected cardinality bands:
+
+| Role | Band | Score |
+|---|---|---|
+| `cell_type_coarse` | $2\le u_c\le 25$ | 1.0 |
+| `cell_type_coarse` | outside band | 0.3 |
+| `cell_type_fine` | $5\le u_c\le 200$ | 1.0 |
+| `cell_type_fine` | outside band | 0.3 |
+
+**Score:**
+
+$$\boxed{\,s_c=\operatorname{clip}\bigl(0.4\,\mathrm{name\_score}(c,r)+0.4\,\mathrm{vocab}(c)+0.2\,\mathrm{card\_fit}(u_c,r)\bigr)\,}$$
+
+Candidates with score $\le 0$ are dropped.
 
 ---
 
-## 6. LLM scorer
+## 7. Two-stage LLM scorer
 
-The primary path issues **one** structured call
+### 7.1 Stage 1 — holistic ranking
 
-$$\mathcal{R}=\mathrm{LLM}\bigl(\text{system prompt},\ \mathrm{JSON}(\mathcal{D})\bigr),$$
+One structured LLM call over all requested roles simultaneously:
 
-through one of two interchangeable backends, selected by `provider`:
+$$\mathcal{R}=\mathrm{LLM}\bigl(\text{system prompt},\ \text{[hint block] + roles + JSON}(\mathcal{D})\bigr).$$
 
-* **`anthropic`** (default, for Claude) — native `messages.parse` constrains the
-  reply to the Pydantic schema directly.
-* **`openai`** — any OpenAI-compatible `/chat/completions` endpoint (OpenAI,
-  Volcengine ARK, DeepSeek, vLLM, …). The reply *text* is parsed: strip Markdown
-  fences, slice the outermost JSON object/array, then validate against the same
-  Pydantic schema. A bare array is wrapped as `{"candidates": […]}`.
+Two backends, selected by `provider`:
 
-Either way $\mathcal{R}$ is the schema *list of* $(\texttt{column},
+- **`anthropic`** (default) — native `messages.parse` constrains the reply to the
+  Pydantic schema `RankedCandidates` directly.
+- **`openai`** — any OpenAI-compatible `/chat/completions` endpoint. The reply
+  text is parsed: strip Markdown fences, slice the outermost JSON object/array,
+  then validate against the same Pydantic schema. A bare array is wrapped as
+  `{"candidates": […]}`.
+
+The schema for each candidate is $(\texttt{role}, \texttt{column},
 \texttt{kind}, \texttt{score}, \texttt{reason})$. Let $L$ be the set of **valid
-labels** in $\mathcal{D}$ — every column name, every composite label `"a + b"`,
-and the barcode label — together with the map $\ell\mapsto\mathrm{kind}(\ell)$.
-Post-processing is identical for both backends, a guard:
+labels** in $\mathcal{D}$. Post-processing (identical for both backends):
 
-$$\widehat{\mathcal{R}}=\Bigl\{\bigl(\ell,\ \mathrm{kind}(\ell),\ \operatorname{clip}(s),\ r\bigr)\ :\ (\ell,\cdot,s,r)\in\mathcal{R},\ \ell\in L\Bigr\}.$$
+$$\widehat{\mathcal{R}}=\Bigl\{\bigl(r,\ \ell,\ \mathrm{kind}(\ell),\ \operatorname{clip}(s),\ t\bigr)\ :\ (r,\ell,\cdot,s,t)\in\mathcal{R},\ r\in\text{requested},\ \ell\in L\Bigr\}.$$
 
-That is: a returned label not in $L$ is **dropped** (hallucination guard); the
-score is clipped to $[0,1]$; and `kind` is taken from $\mathcal{D}$, not from the
-model. Results are tagged $\mathrm{source}=\texttt{llm}$ and sorted by score
-descending. Any failure — the SDK missing, no API key, network/API error, or
-unparseable output — raises `LLMUnavailable`.
+That is: a returned role not in the requested set is dropped; a returned label
+not in $L$ is **dropped** (hallucination guard); the score is clipped to
+$[0,1]$; and `kind` is taken from $\mathcal{D}$, not from the model. Results
+are tagged $\mathrm{source}=\texttt{llm}$ and sorted by score descending per
+role. Any failure — missing SDK, no API key, network/API error, or unparseable
+output — raises `LLMUnavailable`.
+
+**Cell-type coarse vs. fine resolution.** The system prompt instructs the model
+to distinguish the two cell-type roles by cardinality (fewer broad categories =
+coarse; more fine-grained subtypes = fine), using the column's value examples
+and `n_unique`.
+
+**Numeric disambiguation.** The system prompt supplies value stats
+(`v_min`, `v_max`, `v_median`, `frac_unit`, `is_integer_valued`) and explicit
+guidance on look-alikes: `total_counts` is `n_counts`; `total_counts_mt` and
+`total_counts_hb` are subset counts, not `n_counts`; `n_genes_by_counts` is
+`n_genes`; `pct_*` and `doublet_score` are fractions in $[0,1]$, not
+percentages.
+
+### 7.2 Stage 2 — numeric adjudication (Δ = 0.15)
+
+After stage 1, for each numeric role the top-2 candidates are compared. If
+their scores are within $\Delta=0.15$ of each other, that role is **contended**
+and enters stage 2. Stage 2 issues a second, focused LLM call (system prompt:
+`ADJUDICATION_SYSTEM_PROMPT`) with only the contended roles and their candidate
+columns plus full value stats.
+
+The model returns one `verdict` per contended role: `(role, column, reason)`.
+The verdict's chosen column is moved to rank 1 for that role (its score is set
+to the maximum of the contended candidates to preserve sort stability).
+
+Stage 2 is **non-fatal**: `LLMUnavailable` from the adjudication call is caught
+and the stage-1 ranking is used unchanged.
+
+When stage 2 actually runs and produces verdicts, the method string gains the
+suffix `" + adjudication"` (e.g. `"llm (anthropic) + adjudication"`).
+
+### 7.3 `--hint` injection
+
+When a non-empty `hint` string is supplied, it is prepended to the **user
+prompt** in both stage-1 and stage-2 calls as an authoritative block:
+
+```
+User guidance (authoritative — follow this to locate the columns):
+<hint text>
+
+<rest of prompt>
+```
+
+`hint` is ignored (has no effect) when `use_llm=False` / `--no-llm`.
 
 ---
 
-## 7. Orchestration and output
+## 8. Orchestration and output
 
-`rank_sample_columns` selects a ranker, then sorts and truncates:
+`rank_meta_columns` selects a ranker, then sorts and truncates per role:
 
-$$\text{candidates}=
+$$\text{ranked}=
 \begin{cases}
-\mathrm{LLM}(\mathcal{D}) & \texttt{use\_llm} \ \wedge\ \text{LLM succeeds},\\
+\mathrm{LLM}_1(\mathcal{D}) \xrightarrow{+\,\mathrm{LLM}_2\text{ if ambiguous}} \text{adjusted} & \texttt{use\_llm} \wedge \text{LLM succeeds},\\
 \mathrm{heuristic}(\mathcal{D}) & \neg\,\texttt{use\_llm}\ \vee\ \texttt{LLMUnavailable},
 \end{cases}$$
 
-$$\text{result}=\operatorname{sort}_{\downarrow\,\mathrm{score}}(\text{candidates})\big[:\!k\big]\quad(\text{truncate only if } k>0).$$
+$$\text{result}[r]=\operatorname{sort}_{\downarrow\,\mathrm{score}}\bigl(\text{ranked}[r]\bigr)\big[:\!k\big]\quad\forall r\in\text{roles}\quad(\text{truncate only if } k>0).$$
 
-The returned `RankResult` carries the candidate list, the `method` string
-(`"llm (<provider>)"`, `"heuristic"`, or `"heuristic (llm unavailable: …)"`), and the digest
-$\mathcal{D}$. The CLI serializes this to one JSON object on stdout
-(see the README's *Output* section); exit code is $0$ if any candidate survived,
-$2$ if none, $1$ on an IO error.
+The returned `MetaColsResult` carries:
+
+- `.roles` — `dict[str, list[Candidate]]`, one key per requested role, each list
+  sorted descending by score, truncated to `top_k`.
+- `.method` — one of `"llm (<provider>)"`, `"llm (<provider>) + adjudication"`,
+  `"heuristic"`, or `"heuristic (llm unavailable: …)"`.
+- `.digest` — the `ObsDigest` $\mathcal{D}$.
+- `.top(role)` — returns `roles[role][0]` or `None` if the list is empty.
+
+The CLI serializes this to one JSON object on stdout (see the README's *Output*
+section); exit code is $0$ if any candidate survived across all roles, $2$ if
+none, $1$ on an IO error or bad `--roles` argument.

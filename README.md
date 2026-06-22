@@ -1,61 +1,90 @@
 # stanmetacols
 
-Rank which AnnData `.obs` column — or composite key, or barcode-derived
-grouping — identifies the **sample** each cell came from (the natural grouping
-unit for per-sample QC, batch grouping, or pseudobulk). It **ranks**; it does
+Identify which AnnData `.obs` columns fill standard **metadata roles** in a
+single-cell dataset — sample grouping, per-cell QC fractions, count/gene
+statistics, and cell-type labels. It **ranks** candidates for each role; it does
 not decide.
 
-Primary path: a single structured LLM call over a compact, deterministic digest
-of `.obs` — via Claude (`claude-opus-4-8`) by default, or **any
-OpenAI-compatible endpoint** (OpenAI, Volcengine ARK, DeepSeek, vLLM, Ollama, …;
-see [Providers](#providers)). With no API key or no network, it falls back to a
-deterministic heuristic ranker over the same digest — so it always returns an
-answer offline.
+**8 roles, 3 types:** `sample` (grouping); `pct_mt`, `pct_hb`,
+`doublet_score`, `n_counts`, `n_genes` (numeric per-cell); `cell_type_coarse`,
+`cell_type_fine` (cell-type labels). Any role may be absent from the result.
+
+**Two paths, same digest:** a deterministic heuristic (name aliases + per-type
+value-shape checks) and a structured LLM pass (two-stage: holistic ranking then
+numeric adjudication). The heuristic is the fallback when the LLM is
+unavailable.
 
 The CLI speaks **JSON only** — stdout is always a single JSON object, ready to
 pipe into `jq` or load in another program.
 
+---
+
 ## Install
 
 ```bash
-pip install -e .            # core + heuristic only
-pip install -e ".[llm]"     # add the Anthropic backend (Claude, default)
-pip install -e ".[openai]"  # add the OpenAI-compatible backend (OpenAI, ARK, …)
-pip install -e ".[anndata]" # add .h5ad reading / AnnData inputs
+pip install -e .                # core + heuristic only
+pip install -e ".[llm]"         # add the Anthropic backend (Claude, default)
+pip install -e ".[openai]"      # add the OpenAI-compatible backend (OpenAI, ARK, …)
+pip install -e ".[anndata]"     # add .h5ad reading / AnnData inputs
 ```
 
 The Anthropic backend reads `ANTHROPIC_API_KEY`; the OpenAI-compatible backend
 reads `OPENAI_API_KEY` / `OPENAI_BASE_URL` (see [Providers](#providers)).
 
+---
+
+## Roles
+
+| Role | Type | Description |
+|---|---|---|
+| `sample` | grouping | the sample each cell came from (grouping unit for per-sample QC / pseudobulk) |
+| `pct_mt` | numeric | per-cell mitochondrial-gene fraction, a float in [0, 1] |
+| `pct_hb` | numeric | per-cell hemoglobin-gene fraction, a float in [0, 1] |
+| `doublet_score` | numeric | per-cell doublet detection score, a float in [0, 1] |
+| `n_counts` | numeric | total counts / UMIs per cell (non-negative integer, large) |
+| `n_genes` | numeric | number of genes detected per cell (non-negative integer) |
+| `cell_type_coarse` | celltype | coarse / broad cell-type or lineage label (fewer categories) |
+| `cell_type_fine` | celltype | fine-grained cell-type / subtype label (more categories) |
+
+`pct_mt`, `pct_hb`, and `doublet_score` are fractions in `[0, 1]`, **not**
+percentages in `[0, 100]`. Any role may be absent (its list is empty).
+
+---
+
 ## CLI
 
 ```bash
-stanmetacols sample.h5ad              # LLM if key present, else heuristic
-stanmetacols sample.h5ad --no-llm     # force offline heuristic
-stanmetacols sample.h5ad --top 0      # all candidates (default: top 5)
-python -m stanmetacols sample.h5ad    # equivalent module form
+stanmetacols sample.h5ad                  # LLM if key present, else heuristic
+stanmetacols sample.h5ad --no-llm         # force offline heuristic
+stanmetacols sample.h5ad --top 0          # all candidates (default: top 5)
+stanmetacols sample.h5ad --roles pct_mt,n_counts   # only these roles
+python -m stanmetacols sample.h5ad        # equivalent module form
 ```
 
 | Flag | Default | Meaning |
 |---|---|---|
+| `--roles ROLES` | all 8 | comma-separated subset of the 8 role keys |
 | `--no-llm` | off | force the offline heuristic ranker (no API call) |
-| `--top K` | `5` | keep the K highest-scored candidates; `0` = all |
+| `--top K` | `5` | keep the K highest-scored candidates per role; `0` = all |
 | `--provider P` | `anthropic` | LLM backend: `anthropic` or `openai` (see [Providers](#providers)) |
-| `--model ID` | `claude-opus-4-8` | LLM model id; set this when `--provider openai` |
+| `--model ID` | `claude-opus-4-8` | LLM model ID; set this when `--provider openai` |
 | `--base-url URL` | `$OPENAI_BASE_URL` | OpenAI-compatible endpoint base URL |
 | `--api-key-env VAR` | SDK default | name of the env var holding the API key |
+| `--hint TEXT` | `""` | free-text guidance for the LLM to locate columns (LLM path only; ignored with `--no-llm`) |
+
+---
 
 ## Providers
 
-The primary ranker runs through one of two backends, chosen by `--provider`. The
-heuristic fallback is provider-independent.
+The primary ranker runs through one of two backends, chosen by `--provider`.
+The heuristic fallback is provider-independent.
 
 **`anthropic`** (default) — native `messages.parse` with a strict structured
 output schema. Reads `ANTHROPIC_API_KEY`. Best structured-output guarantee; this
 is the path for Claude.
 
 ```bash
-stanmetacols sample.h5ad                          # claude-opus-4-8
+stanmetacols sample.h5ad                  # claude-opus-4-8
 ```
 
 **`openai`** — any OpenAI-compatible `/chat/completions` endpoint (OpenAI,
@@ -81,71 +110,148 @@ stanmetacols sample.h5ad --provider openai \
     --api-key-env ARK_API_KEY --model ep-xxxxxxxxxxxx
 ```
 
+---
+
 ## Output
 
 The CLI emits **one JSON object on stdout** — always, including when nothing is
-found (`candidates` is then `[]`). Diagnostics for unreadable files go to
-**stderr**, not stdout, so a consumer can parse stdout whenever the exit code is
-`0` or `2`.
+found. Diagnostics for unreadable files go to **stderr** only, so a consumer can
+parse stdout whenever the exit code is `0` or `2`.
 
 ```jsonc
 {
-  "method": "heuristic",            // "llm (anthropic)" | "llm (openai)" | "heuristic" | "heuristic (llm unavailable: …)"
-  "candidates": [                   // sorted by score, highest first; length ≤ --top
-    {
-      "column": "sample",           // .obs column; composite is "a + b"; barcode is "<barcode:prefix:_>"
-      "kind": "single",             // "single" | "composite" | "barcode"
-      "score": 0.8820472360312052,  // 0..1, full precision
-      "reason": "name match=1.0, n_unique=3, balance=0.53",  // one-line justification
-      "source": "heuristic"         // "llm" | "heuristic" — which ranker produced this row
-    }
-  ]
+  "method": "llm (anthropic)",           // see method values table below
+  "roles": {
+    "sample": [
+      {
+        "role": "sample",
+        "column": "donor_id",            // .obs column; composite is "a + b"; barcode is "<barcode:prefix:_>"
+        "kind": "single",                // "single" | "composite" | "barcode"
+        "score": 0.95,                   // 0..1, full precision
+        "reason": "exact alias, n_unique=8, balance=0.87",
+        "source": "llm"                  // "llm" | "heuristic"
+      }
+    ],
+    "pct_mt": [
+      {
+        "role": "pct_mt",
+        "column": "pct_counts_mt",
+        "kind": "single",
+        "score": 0.97,
+        "reason": "canonical mitochondrial fraction column, frac_unit=1.0",
+        "source": "llm"
+      }
+    ],
+    "pct_hb": [],
+    "doublet_score": [],
+    "n_counts": [],
+    "n_genes": [],
+    "cell_type_coarse": [],
+    "cell_type_fine": []
+  }
 }
 ```
 
+### Output field reference
+
 | Field | Type | Notes |
 |---|---|---|
-| `method` | string | Which path ran end-to-end: `llm (<provider>)`, `heuristic`, or `heuristic (llm unavailable: …)` (the last names why the LLM was skipped). |
-| `candidates[]` | array | May be empty. Each element is one ranked entry, in descending `score`. |
-| `candidates[].column` | string | The entry's label: a column name, a `"a + b"` composite, or a `"<barcode:POSITION:DELIM>"` barcode grouping. |
-| `candidates[].kind` | enum | `single`, `composite`, or `barcode`. |
-| `candidates[].score` | float | Confidence in `0..1` (full precision; not rounded). |
-| `candidates[].reason` | string | Human-readable one-liner explaining the score. |
-| `candidates[].source` | enum | `llm` or `heuristic` — the ranker that emitted this row. |
+| `method` | string | Which path ran end-to-end (see table below). |
+| `roles` | object | One key per requested role; value is a list of candidates sorted by `score` desc, truncated to `--top`. An absent or unidentified role has an empty list. |
+| `roles.<role>[].role` | string | Role key this candidate was scored for. |
+| `roles.<role>[].column` | string | Column name, `"a + b"` composite, or `"<barcode:POSITION:DELIM>"` barcode grouping. |
+| `roles.<role>[].kind` | enum | `single`, `composite`, or `barcode`. |
+| `roles.<role>[].score` | float | Confidence in `0..1` (full precision; not rounded). |
+| `roles.<role>[].reason` | string | Human-readable one-liner explaining the score. |
+| `roles.<role>[].source` | enum | `llm` or `heuristic` — the ranker that emitted this row. |
 
-**Exit codes:** `0` ≥ 1 candidate · `2` none found (still valid JSON on stdout) ·
-`1` IO error (message on stderr).
+### Method values
+
+| `method` string | Meaning |
+|---|---|
+| `"llm (anthropic)"` | Stage-1 holistic LLM ran, Anthropic backend. |
+| `"llm (anthropic) + adjudication"` | Stage-1 + stage-2 numeric adjudication both ran, Anthropic backend. |
+| `"llm (openai)"` | Stage-1 holistic LLM ran, OpenAI-compatible backend. |
+| `"llm (openai) + adjudication"` | Stage-1 + stage-2 numeric adjudication both ran, OpenAI-compatible backend. |
+| `"heuristic"` | `--no-llm` was passed; deterministic heuristic was used. |
+| `"heuristic (llm unavailable: …)"` | LLM path failed (no key / no network / API error); fell back to heuristic. The `…` names the reason. |
+
+**Exit codes:** `0` at least one candidate found · `2` no candidates at all (still valid JSON on stdout) · `1` IO error or bad `--roles` argument (message on stderr).
 
 ```bash
-# e.g. take the single best column name, or empty if none:
-stanmetacols sample.h5ad --no-llm | jq -r '.candidates[0].column // empty'
+# Take the best pct_mt column name, or empty if none:
+stanmetacols sample.h5ad --no-llm | jq -r '.roles.pct_mt[0].column // empty'
 ```
+
+---
 
 ## Library
 
 ```python
-from stanmetacols import rank_sample_columns
+from stanmetacols import rank_meta_columns
 
-res = rank_sample_columns(adata)          # or pass a pandas .obs DataFrame
-for c in res.candidates:                  # sorted by score, top 5 by default
-    print(c.score, c.kind, c.column, "—", c.reason)
-print(res.method)                         # "llm (anthropic)" or "heuristic (...)"
-best = res.top()                          # highest-scored; you decide whether to use it
+result = rank_meta_columns(adata)           # or pass a pandas .obs DataFrame
 
-# OpenAI-compatible backend (e.g. Volcengine ARK):
-res = rank_sample_columns(
-    adata, provider="openai", model="ep-xxxx",
-    base_url="https://ark.cn-beijing.volces.com/api/v3", api_key="…")
+# Top candidate for each role (or None if absent):
+best_sample  = result.top("sample")
+best_pct_mt  = result.top("pct_mt")
+
+print(result.method)                        # "llm (anthropic)" or "heuristic (...)"
+if best_pct_mt:
+    print(best_pct_mt.column, best_pct_mt.score, best_pct_mt.reason)
+
+# Iterate all candidates for a role:
+for c in result.roles.get("n_counts", []):
+    print(c.score, c.column, c.reason)
 ```
 
-`rank_sample_columns(data, *, use_llm=True, provider="anthropic", model="claude-opus-4-8", client=None, base_url=None, api_key=None, top_k=5)`.
-Never mutates the input; writes no files.
+**Full signature** (copied verbatim from `rank.py`):
+
+```python
+def rank_meta_columns(data, *, roles=None, use_llm: bool = True,
+                      adjudicate: bool = True, hint: str = "",
+                      provider: str = "anthropic",
+                      model: str = "claude-opus-4-8", client=None,
+                      base_url: str | None = None, api_key: str | None = None,
+                      top_k: int | None = 5) -> MetaColsResult:
+```
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `data` | — | `AnnData` or a pandas `DataFrame` (`.obs`) |
+| `roles` | `None` (all 8) | list of role keys to identify; `None` = all 8 |
+| `use_llm` | `True` | set `False` to force the offline heuristic |
+| `adjudicate` | `True` | run stage-2 numeric adjudication when stage-1 is ambiguous (Δ ≤ 0.15) |
+| `hint` | `""` | free-text guidance threaded into both LLM stages (ignored when `use_llm=False`) |
+| `provider` | `"anthropic"` | `"anthropic"` or `"openai"` |
+| `model` | `"claude-opus-4-8"` | LLM model ID |
+| `client` | `None` | pre-built SDK client (skips client construction) |
+| `base_url` | `None` | OpenAI-compatible base URL |
+| `api_key` | `None` | API key (alternative to env var) |
+| `top_k` | `5` | candidates per role; `None` or `0` = all |
+
+Returns a `MetaColsResult` with `.roles` (`dict[str, list[Candidate]]`),
+`.method` (string), and `.digest`. Never mutates the input; writes no files.
+
+**`--hint` / provider example:**
+
+```python
+# Pass user guidance to both LLM stages and use the OpenAI backend:
+result = rank_meta_columns(
+    adata,
+    hint="This dataset uses 'Donor' for sample and 'leiden_coarse' for broad cell types.",
+    provider="openai",
+    model="gpt-4o-mini",
+)
+```
+
+---
 
 ## How it works
 
-For the precise math — partition statistics, eligibility predicates, and the
-exact scoring formulas — see [`docs/formulation.md`](docs/formulation.md). This
-section is the prose tour.
+For the precise math — the digest, the role registry, all scoring formulas, and
+the two-stage LLM pipeline — see
+[`docs/formulation.md`](docs/formulation.md). This section is the prose tour.
 
 The pipeline is **profile → rank → fall back → report**. A single deterministic
 *digest* of `.obs` is built once, then handed to one of two interchangeable
@@ -153,99 +259,44 @@ rankers. The LLM never sees raw cell data — only the compact digest — so the
 call is cheap, private, and reproducible, and the offline heuristic scores the
 *exact same* digest when the LLM is unavailable.
 
-```mermaid
-flowchart TD
-    A["Input: AnnData or pandas .obs"] --> B["_extract<br/>obs DataFrame + obs_names"]
-    B --> C["profile_obs → ObsDigest<br/>deterministic · no LLM · no mutation"]
-
-    subgraph DIGEST ["Stage 1 · Digest (profile.py)"]
-        C --> C1["per-column profile<br/>dtype · n_unique · balance ·<br/>unique_per_cell · single_value ·<br/>looks_like_barcode"]
-        C --> C2["composite-key candidates<br/>eligible columns → pairs →<br/>groupby → keep balanced"]
-        C --> C3["barcode grouping<br/>prefix on '_' / suffix on '-'"]
-    end
-
-    C1 --> D{"use_llm?"}
-    C2 --> D
-    C3 --> D
-
-    D -- "yes" --> E["rank_with_llm<br/>one structured LLM call<br/>anthropic | openai backend"]
-    E -- "ok" --> G["candidates source=llm<br/>hallucinations dropped ·<br/>score clamped 0..1"]
-    E -- "LLMUnavailable<br/>no key / no net / API error" --> F["rank_heuristic<br/>deterministic scoring"]
-    D -- "no (--no-llm)" --> F
-    F --> H["candidates source=heuristic"]
-
-    G --> I["sort by score desc → top_k"]
-    H --> I
-    I --> J["RankResult: candidates · method · digest"]
-    J --> K["CLI: JSON on stdout<br/>exit 0 found · 2 none · 1 IO error"]
-```
-
 ### Stage 1 — Digest (`profile.py`, deterministic)
 
-`profile_obs(obs, obs_names)` reduces `.obs` to an `ObsDigest` with three kinds
-of candidates. It reads only `.obs` (the CLI opens `.h5ad` with `backed="r"`),
-never mutates input, and makes no network call.
-
-**Per-column profile** — for every `.obs` column:
-
-| Feature | Meaning |
-|---|---|
-| `dtype` | `categorical` / `string` / `integer` / `float` / `bool` |
-| `n_unique`, `n_missing` | distinct non-null values, missing count |
-| `balance` | `min_group / max_group` cells — 1.0 = perfectly even |
-| `unique_per_cell` | `n_unique == n_obs` → a cell ID, **not** a sample |
-| `single_value` | `n_unique <= 1` → one batch, nothing to split |
-| `looks_like_barcode` | >50% of values match `^[ACGTN]{8,}(-\d+)?$` |
-
-**Composite keys** — columns that are individually too coarse can jointly
-identify a sample. Eligible columns (not unique-per-cell, not single-value, not
-barcode, `2 ≤ n_unique ≤ 0.5·n_obs`) are paired; each pair is `groupby`-counted,
-kept only if it forms `2 ≤ groups < n_obs`, and ranked by balance. Work is
-bounded to the 12 most balanced columns (the `O(k²)` guard) and the 8 best pairs.
-
-**Barcode grouping** — when the sample lives only in the cell name
-(`obs_names`): a `_` prefix (`OA1_AAAC…` → `OA1`) if >90% of names contain `_`,
-or a numeric `-` suffix (`AAAC…-1` → `1`) if >90% of tails are digits. The
-grouping is kept only if it yields `2 ≤ groups < n_obs`; the most balanced wins.
+`profile_obs(obs, obs_names)` reduces `.obs` to an `ObsDigest`. For grouping
+candidates it computes per-column cardinality/balance, composite keys, and
+barcode groupings. For every column it also records **numeric value stats**
+(`v_min`, `v_max`, `v_median`, `frac_nonneg`, `frac_unit`,
+`is_integer_valued`) needed by the numeric-role scorers.
 
 ### Stage 2 — Rank (two paths, same digest)
 
-**LLM path** (`llm.py`) — one structured LLM call over the digest, through one of
-two backends (`--provider`, see [Providers](#providers)): native Anthropic
-`messages.parse` for Claude (default), or any OpenAI-compatible
-`/chat/completions` endpoint whose JSON reply is parsed against the same schema.
-The system prompt frames the task (*identify the sample grouping unit*) and
-supplies name hints; the user prompt is the digest as JSON. Either way the reply
-is validated against the real candidate labels — **any column the model invents
-is dropped**, scores are clamped to `0..1`, and each candidate's `kind` is taken
-from the digest, not the model. Missing key, missing network, missing SDK, API
-error, or unparseable output all raise `LLMUnavailable` → automatic fallback.
+**LLM path** — a two-stage structured call:
 
-**Heuristic path** (`heuristic.py`) — deterministic, offline. Single columns
-(skipping single-value and unique-per-cell) score:
+- **Stage 1 (holistic ranking):** one LLM call over all requested roles at
+  once. For cell-type roles the model uses value examples and cardinality to
+  resolve coarse vs. fine; for numeric roles it uses the value stats to
+  distinguish look-alikes (e.g. `total_counts` vs. `total_counts_mt`).
+- **Stage 2 (numeric adjudication):** if two candidates for the same numeric
+  role are within Δ = 0.15 of each other in stage-1 score, a second focused
+  call re-evaluates only those tied columns with their value statistics. Stage 2
+  is non-fatal — if it fails, the stage-1 ranking is kept unchanged.
 
-```
-score = 0.5·name_signal + 0.25·cardinality_signal + 0.25·balance − penalties   (clamped 0..1)
-```
+Any `--hint` text is injected as an authoritative block at the top of the user
+prompt in **both** stages.
 
-| Term | Value |
-|---|---|
-| `name_signal` | `1.0` exact alias (`sample`, `donor`, `orig.ident`, `gsm`, `batch`, …) · `0.6` alias substring · else `0.0` |
-| `cardinality_signal` | `0.0` if `n_unique < 2` · `1.0` if `n_unique ≤ max(50, 0.2·n_obs)` · else `0.3` |
-| `balance` | the digest's `min/max` group ratio |
-| `penalties` | `+0.5` float · `+0.5` barcode-looking · `+0.3` if >50% missing |
+**Heuristic path** — deterministic, offline. Scoring is role-type-specific (see
+[`docs/formulation.md`](docs/formulation.md) for exact formulas):
 
-Composite keys use the member-averaged name signal with a 15% discount
-(`×0.85`); the barcode grouping scores `0.45·balance + 0.1`. Candidates scoring
-`≤ 0` are dropped.
+- **Grouping** (`sample`): `clip(0.5·name + 0.25·card + 0.25·balance − penalties)`.
+- **Numeric** (`pct_mt`, etc.): `clip(0.6·name + 0.4·value)` — requires a name
+  hit (`name > 0`); skips columns with no recognizable name.
+- **Cell-type** (`cell_type_coarse`, `cell_type_fine`):
+  `clip(0.4·name + 0.4·vocab + 0.2·card_fit)` — uses both name signals and a
+  vocabulary scan of the actual cell values.
 
-### Stage 3 — Report (`rank.py` → CLI)
+### Stage 3 — Report
 
-Candidates from whichever path ran are sorted by score (desc) and truncated to
-`top_k` (`top_k=0`/`None` ⇒ all). The result carries `method` (`"llm (<provider>)"`,
-`"heuristic"`, or `"heuristic (llm unavailable: …)"`) so you always know which
-path produced it.
-The CLI serializes this to a single JSON object on stdout (see
-[Output](#output)); the library hands back a `RankResult`, whose `.top()`
-returns the single best candidate — **but the tool ranks; you decide whether to
-trust the pick.**
+Per-role candidate lists are sorted by score (desc) and truncated to `top_k`.
+The result carries `method` so you always know which path produced it.
+The CLI serializes to a single JSON object on stdout (see [Output](#output));
+the library returns a `MetaColsResult`, whose `.top(role)` gives the single
+best candidate for any role.
