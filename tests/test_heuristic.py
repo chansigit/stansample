@@ -66,3 +66,38 @@ def test_non_celltype_column_not_surfaced():
     out = rank_heuristic(_celltype_digest(), ["cell_type_coarse"])
     cols = [c.column for c in out["cell_type_coarse"]]
     assert "tissue" not in cols       # tissue values aren't cell-type names
+
+
+def _organ_tissue_digest():
+    n = 60
+    return profile_obs(pd.DataFrame({
+        "organ": ["heart"] * 20 + ["liver"] * 20 + ["lung"] * 20,
+        "tissue": ["blood"] * 20 + ["PBMC"] * 20 + ["bone marrow"] * 20,
+        "lineage_label": ["heart"] * 20 + ["liver"] * 20 + ["lung"] * 20,  # organ values, neutral name
+    }, index=[f"c{i}" for i in range(n)]))
+
+
+def test_organ_tissue_top_columns_and_no_crosstalk():
+    out = rank_heuristic(_organ_tissue_digest(), ["organ", "tissue"])
+    assert out["organ"][0].column == "organ"
+    assert out["tissue"][0].column == "tissue"
+    organ_cols = [c.column for c in out["organ"]]
+    tissue_cols = [c.column for c in out["tissue"]]
+    # disjoint vocabularies: neither column bleeds into the other role
+    assert "tissue" not in organ_cols      # blood/PBMC/marrow are not organs
+    assert "organ" not in tissue_cols      # heart/liver/lung are not tissues
+
+
+def test_vocab_routing_by_value_not_just_name():
+    # a neutrally-named column holding organ values routes to organ, not tissue
+    out = rank_heuristic(_organ_tissue_digest(), ["organ", "tissue"])
+    assert "lineage_label" in [c.column for c in out["organ"]]
+    assert "lineage_label" not in [c.column for c in out["tissue"]]
+
+
+def test_vocab_skips_single_value_column():
+    # a single-valued tissue-named column must NOT surface (mirrors CLI exit-2 case)
+    d = profile_obs(pd.DataFrame({"tissue": ["lung"] * 8},
+                                 index=[f"c{i}" for i in range(8)]))
+    assert rank_heuristic(d, ["organ", "tissue"])["tissue"] == []
+    assert rank_heuristic(d, ["organ", "tissue"])["organ"] == []

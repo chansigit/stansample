@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from .schema import ObsDigest, Candidate
 from .roles import (ROLES, name_signal, value_check, celltype_value_frac,
-                    celltype_name_base)
+                    celltype_name_base, vocab_value_frac, vocab_name_base)
 from .roles import normalize as _normalize
 
 _SAMPLE_ALIASES = {_normalize(a) for a in ROLES["sample"].aliases}
@@ -132,6 +132,41 @@ def _rank_celltype(digest: ObsDigest, role) -> list:
     return out
 
 
+_VOCAB_CARD = (2, 50)
+
+
+def _vocab_card_fit(n_unique: int) -> float:
+    lo, hi = _VOCAB_CARD
+    return 1.0 if lo <= n_unique <= hi else 0.3
+
+
+def _rank_vocab(digest: ObsDigest, role) -> list:
+    """Score categorical label columns (organ, tissue) by name + value vocabulary."""
+    out = []
+    for c in digest.columns:
+        if c.single_value or c.unique_per_cell:
+            continue
+        if c.dtype not in ("categorical", "string"):
+            continue
+        ns = name_signal(c.name, role)
+        base = vocab_name_base(c.name, role)
+        vocab = vocab_value_frac(c, role)
+        name_score = max(ns, 0.6 * base)
+        if name_score <= 0 and vocab < 0.5:      # must look like the role
+            continue
+        card = _vocab_card_fit(c.n_unique)
+        score = max(0.0, min(1.0, 0.4 * name_score + 0.4 * vocab + 0.2 * card))
+        if score <= 0:
+            continue
+        out.append(Candidate(
+            role=role.key, column=c.name, kind="single", score=score,
+            source="heuristic",
+            reason=(f"name={name_score:.1f}, {role.key}_vocab={vocab:.2f}, "
+                    f"n_unique={c.n_unique}")))
+    out.sort(key=lambda c: c.score, reverse=True)
+    return out
+
+
 def rank_heuristic(digest: ObsDigest, roles) -> dict:
     out = {}
     for key in roles:
@@ -140,6 +175,8 @@ def rank_heuristic(digest: ObsDigest, roles) -> dict:
             out[key] = _rank_sample(digest)
         elif role.type == "numeric":
             out[key] = _rank_numeric(digest, role)
+        elif role.type in ("organ", "tissue"):
+            out[key] = _rank_vocab(digest, role)
         else:                                    # "celltype"
             out[key] = _rank_celltype(digest, role)
     return out
