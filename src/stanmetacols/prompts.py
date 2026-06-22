@@ -24,6 +24,8 @@ _ROLE_DESCRIPTIONS = {
 def _roles_block(roles) -> str:
     lines = []
     for k in roles:
+        # show only the first few aliases as hints — the full list would bloat
+        # the prompt without helping; the model also reasons from the digest values
         aliases = ", ".join(ROLES[k].aliases[:6])
         lines.append(f"- {k}: {_ROLE_DESCRIPTIONS[k]}. Common names: {aliases}.")
     return "\n".join(lines)
