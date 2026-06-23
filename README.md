@@ -11,9 +11,10 @@ not decide.
 
 See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
-**8 roles, 3 types:** `sample` (grouping); `pct_mt`, `pct_hb`,
+**10 roles, 4 types:** `sample` (grouping); `pct_mt`, `pct_hb`,
 `doublet_score`, `n_counts`, `n_genes` (numeric per-cell); `cell_type_coarse`,
-`cell_type_fine` (cell-type labels). Any role may be absent from the result.
+`cell_type_fine` (cell-type labels); `organ`, `tissue` (categorical anatomical
+metadata). Any role may be absent from the result.
 
 **Two paths, same digest:** a deterministic heuristic (name aliases + per-type
 value-shape checks) and a structured LLM pass (two-stage: holistic ranking then
@@ -51,6 +52,8 @@ reads `OPENAI_API_KEY` / `OPENAI_BASE_URL` (see [Providers](#providers)).
 | `n_genes` | numeric | number of genes detected per cell (non-negative integer) |
 | `cell_type_coarse` | celltype | coarse / broad cell-type or lineage label (fewer categories) |
 | `cell_type_fine` | celltype | fine-grained cell-type / subtype label (more categories) |
+| `organ` | organ | the solid anatomical organ a cell came from (heart, liver, kidney, lung, brain) |
+| `tissue` | tissue | the sampled biological material / anatomical site (blood, PBMC, bone marrow, tumor, biopsy, CSF) |
 
 `pct_mt`, `pct_hb`, and `doublet_score` are fractions in `[0, 1]`, **not**
 percentages in `[0, 100]`. Any role may be absent (its list is empty).
@@ -69,7 +72,7 @@ python -m stanmetacols sample.h5ad        # equivalent module form
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--roles ROLES` | all 8 | comma-separated subset of the 8 role keys |
+| `--roles ROLES` | all 10 | comma-separated subset of the 10 role keys |
 | `--no-llm` | off | force the offline heuristic ranker (no API call) |
 | `--top K` | `5` | keep the K highest-scored candidates per role; `0` = all |
 | `--provider P` | `anthropic` | LLM backend: `anthropic` or `openai` (see [Providers](#providers)) |
@@ -153,7 +156,9 @@ parse stdout whenever the exit code is `0` or `2`.
     "n_counts": [],
     "n_genes": [],
     "cell_type_coarse": [],
-    "cell_type_fine": []
+    "cell_type_fine": [],
+    "organ": [],
+    "tissue": []
   }
 }
 ```
@@ -225,7 +230,7 @@ def rank_meta_columns(data, *, roles=None, use_llm: bool = True,
 | Parameter | Default | Meaning |
 |---|---|---|
 | `data` | — | `AnnData` or a pandas `DataFrame` (`.obs`) |
-| `roles` | `None` (all 8) | list of role keys to identify; `None` = all 8 |
+| `roles` | `None` (all 10) | list of role keys to identify; `None` = all 10 |
 | `use_llm` | `True` | set `False` to force the offline heuristic |
 | `adjudicate` | `True` | run stage-2 numeric adjudication when stage-1 is ambiguous (Δ ≤ 0.15) |
 | `hint` | `""` | free-text guidance threaded into both LLM stages (ignored when `use_llm=False`) |
@@ -298,6 +303,7 @@ prompt in **both** stages.
 - **Cell-type** (`cell_type_coarse`, `cell_type_fine`):
   `clip(0.4·name + 0.4·vocab + 0.2·card_fit)` — uses both name signals and a
   vocabulary scan of the actual cell values.
+- **Categorical label** (`organ`, `tissue`): `clip(0.4·name + 0.4·vocab + 0.2·card_fit)` — name aliases plus a per-role value vocabulary (organ names vs sampled-material names); near-disjoint vocabularies keep the two roles from bleeding into each other.
 
 ### Stage 3 — Report
 

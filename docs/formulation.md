@@ -13,15 +13,18 @@ spans are LaTeX.
 
 The input is an `.obs` table: $n$ cells (rows), a set of columns $\mathcal{C}$,
 and a list of cell names (`obs_names`) $b_1,\dots,b_n$. We want to **identify
-and rank candidate columns** for each of 8 standard metadata roles.
+and rank candidate columns** for each of 10 standard metadata roles.
 
-A role is either:
+A role is one of four types:
 
 - a **grouping** role (`sample`) — assigns each cell to the sample it came from;
 - a **numeric** role (`pct_mt`, `pct_hb`, `doublet_score`, `n_counts`,
   `n_genes`) — carries a per-cell numeric QC measurement;
 - a **cell-type** role (`cell_type_coarse`, `cell_type_fine`) — carries a
-  per-cell label string.
+  per-cell label string;
+- an **organ** role (`organ`) or a **tissue** role (`tissue`) — carries a
+  per-cell categorical anatomical label. Each has its own specific type
+  (`organ` / `tissue`); there is no generic `categorical` type bucket.
 
 For the grouping role, a candidate induces a partition
 
@@ -281,6 +284,60 @@ $$\boxed{\,s_c=\operatorname{clip}\bigl(0.4\,\mathrm{name\_score}(c,r)+0.4\,\mat
 
 Candidates with score $\le 0$ are dropped.
 
+### 6.4 Organ role (`organ`) and tissue role (`tissue`)
+
+These two roles each carry their **own specific type** (`organ` and `tissue`
+respectively) — there is no generic `categorical` type bucket in the registry.
+
+Both are scored by a shared vocabulary-based heuristic `_rank_vocab`, but with
+per-role alias tables and per-role value vocabularies.
+
+**Aliases.** `vocab_name_base(col, role)` returns `1.0` when the normalized
+column name matches a role-specific alias (e.g. `organ`, `tissue`,
+`anatomicallocation`, `samplesite` for `tissue`; `bodypart`, `sourceorgan` for
+`organ`).
+
+**Value vocabulary.** `vocab_value_frac(profile, role)` scans
+`profile.example_values` against a normalized per-role vocabulary and returns
+the fraction of example values that contain any term.
+
+- `organ` vocabulary: heart, liver, kidney, lung, brain, pancreas, spleen,
+  colon, intestine, stomach, thymus, ovary, testis, prostate, uterus, bladder,
+  adrenal, thyroid, tonsil, appendix.
+- `tissue` vocabulary: blood, pbmc, bonemarrow, lymphnode, tumor, biopsy, csf,
+  adipose, skin, muscle, nerve, cornea, retina, placenta, cord, ascites,
+  pleural, synovial, saliva, nasal.
+
+The two vocabularies are **near-disjoint**, which prevents `organ` candidates
+from scoring well on `tissue` columns and vice versa.
+
+**Cardinality fit.** A shared band applies to both roles:
+
+$$\mathrm{card\_fit}(u_c)=
+\begin{cases}
+1.0 & 2\le u_c\le 50\\
+0.3 & \text{otherwise.}
+\end{cases}$$
+
+**Name score:**
+
+$$\mathrm{name\_score}(c,r)=\max\!\bigl(\mathrm{name}(c,r),\ 0.6\cdot\mathrm{vocab\_name\_base}(c,r)\bigr).$$
+
+A column is **admitted** if $\mathrm{name\_score}>0 \vee \mathrm{vocab}(c,r)\ge 0.5$.
+
+**Score:**
+
+$$\boxed{\,s_c=\operatorname{clip}\bigl(0.4\,\mathrm{name\_score}(c,r)+0.4\,\mathrm{vocab}(c,r)+0.2\,\mathrm{card\_fit}(u_c)\bigr)\,}$$
+
+**Rejection gate.** A column is **dropped** (score forced to 0) if
+$\mathrm{name\_score}(c,r)\le 0$ and $\mathrm{vocab}(c,r)<0.5$ — neither the
+name nor the value content is informative enough.
+
+**Exclude-token guard (organ only).** If the normalized column name contains the
+token `organism` (e.g. `organism_id`, `source_organism`), the column is
+**excluded** from the `organ` role regardless of other signals, to avoid
+confusing taxonomy labels with anatomical organ labels.
+
 ---
 
 ## 7. Two-stage LLM scorer
@@ -324,6 +381,14 @@ guidance on look-alikes: `total_counts` is `n_counts`; `total_counts_mt` and
 `total_counts_hb` are subset counts, not `n_counts`; `n_genes_by_counts` is
 `n_genes`; `pct_*` and `doublet_score` are fractions in $[0,1]$, not
 percentages.
+
+**Organ vs. tissue discrimination.** The system prompt instructs the model to
+distinguish the two anatomical roles: `organ` is a solid anatomical structure
+(heart, liver, kidney, lung, brain) while `tissue` is the sampled biological
+material or anatomical site (blood, PBMC, bone marrow, lymph node, tumor,
+biopsy, CSF). A column that names a solid organ should be routed to `organ`;
+a column describing the sampled compartment or preparation method should be
+routed to `tissue`.
 
 ### 7.2 Stage 2 — numeric adjudication (Δ = 0.15)
 

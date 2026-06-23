@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- `organ` and `tissue` metadata roles (10 roles total). Each carries its own
+  specific role type (`organ` / `tissue`) — no generic `categorical` bucket —
+  routed to a shared vocabulary-based heuristic scorer with near-disjoint value
+  vocabularies. Two-stage LLM path gains organ-vs-tissue discrimination guidance.
+
 ## [0.2.0] - 2026-06-22
 
 Renamed from **stansample** and generalized from ranking the single `sample`
