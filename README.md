@@ -236,7 +236,7 @@ def rank_meta_columns(data, *, roles=None, use_llm: bool = True,
 | `hint` | `""` | free-text guidance threaded into both LLM stages (ignored when `use_llm=False`) |
 | `provider` | `"anthropic"` | `"anthropic"` or `"openai"` |
 | `model` | `"claude-opus-4-8"` | LLM model ID |
-| `client` | `None` | pre-built SDK client (skips client construction) |
+| `client` | `None` | pre-built client. For `anthropic`, an `anthropic.Anthropic` (native `messages.parse`). For `openai`, **any object with `.complete(system, user) -> str`** (e.g. `OpenAICompatClient`); when `None`, an `OpenAICompatClient` is built from `base_url`/`api_key`/`model`. |
 | `base_url` | `None` | OpenAI-compatible base URL |
 | `api_key` | `None` | API key (alternative to env var) |
 | `top_k` | `5` | candidates per role; `None` or `0` = all |

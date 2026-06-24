@@ -66,30 +66,18 @@ def test_none_parsed_output_becomes_llm_unavailable():
 
 # --- OpenAI-compatible backend (OpenAI, Volcengine ARK, DeepSeek, vLLM, …) ---
 
-class _OAResp:
-    def __init__(self, content):
-        message = type("Msg", (), {"content": content})()
-        choice = type("Choice", (), {"message": message})()
-        self.choices = [choice]
-
-
-class _StubCompletions:
+class _StubChatClient:
+    """Minimal .complete(system, user) -> str client for the openai path."""
     def __init__(self, content=None, raise_exc=None):
         self._content = content
         self._raise = raise_exc
-        self.kwargs = None
+        self.calls = []
 
-    def create(self, **kwargs):
-        self.kwargs = kwargs
+    def complete(self, system, user):
+        self.calls.append((system, user))
         if self._raise is not None:
             raise self._raise
-        return _OAResp(self._content)
-
-
-class _StubOpenAIClient:
-    def __init__(self, content=None, raise_exc=None):
-        self.completions = _StubCompletions(content, raise_exc)
-        self.chat = type("Chat", (), {"completions": self.completions})()
+        return self._content
 
 
 def test_openai_parses_json_and_filters_hallucinations():
@@ -97,19 +85,18 @@ def test_openai_parses_json_and_filters_hallucinations():
         {"role": "sample", "column": "sample_id", "kind": "single", "score": 0.9, "reason": "ok"},
         {"role": "sample", "column": "made_up", "kind": "single", "score": 0.8, "reason": "halluc"},
     ]})
-    client = _StubOpenAIClient(content)
+    client = _StubChatClient(content)
     out = rank_with_llm(_digest(), ["sample"], provider="openai", client=client)
-    assert [c.column for c in out["sample"]] == ["sample_id"]   # made_up dropped
+    assert [c.column for c in out["sample"]] == ["sample_id"]
     assert all(c.source == "llm" for c in out["sample"])
-    msgs = client.completions.kwargs["messages"]       # system + user, digest carried
-    assert msgs[0]["role"] == "system"
-    assert "sample_id" in msgs[1]["content"]
+    system, user = client.calls[0]
+    assert "sample_id" in user                # digest carried in the user prompt
 
 
 def test_openai_strips_markdown_code_fences():
     body = json.dumps({"candidates": [
         {"role": "sample", "column": "sample_id", "kind": "single", "score": 0.7, "reason": "x"}]})
-    client = _StubOpenAIClient("```json\n" + body + "\n```")
+    client = _StubChatClient("```json\n" + body + "\n```")
     out = rank_with_llm(_digest(), ["sample"], provider="openai", client=client)
     assert [c.column for c in out["sample"]] == ["sample_id"]
 
@@ -117,18 +104,18 @@ def test_openai_strips_markdown_code_fences():
 def test_openai_accepts_bare_json_array():
     content = json.dumps([
         {"role": "sample", "column": "sample_id", "kind": "single", "score": 0.6, "reason": "x"}])
-    out = rank_with_llm(_digest(), ["sample"], provider="openai", client=_StubOpenAIClient(content))
+    out = rank_with_llm(_digest(), ["sample"], provider="openai", client=_StubChatClient(content))
     assert [c.column for c in out["sample"]] == ["sample_id"]
 
 
 def test_openai_non_json_becomes_llm_unavailable():
     with pytest.raises(LLMUnavailable):
         rank_with_llm(_digest(), ["sample"], provider="openai",
-                      client=_StubOpenAIClient("I cannot help with that."))
+                      client=_StubChatClient("I cannot help with that."))
 
 
 def test_openai_api_error_becomes_llm_unavailable():
-    client = _StubOpenAIClient(raise_exc=RuntimeError("network down"))
+    client = _StubChatClient(raise_exc=RuntimeError("network down"))
     with pytest.raises(LLMUnavailable):
         rank_with_llm(_digest(), ["sample"], provider="openai", client=client)
 
@@ -147,7 +134,7 @@ def test_hint_reaches_user_prompt():
 
 
 def test_hint_reaches_openai_user_prompt():
-    client = _StubOpenAIClient(json.dumps({"candidates": []}))
+    client = _StubChatClient(json.dumps({"candidates": []}))
     rank_with_llm(_digest(), ["sample"], hint="OAHINT", provider="openai", client=client)
-    content = client.completions.kwargs["messages"][1]["content"]
-    assert "OAHINT" in content
+    system, user = client.calls[0]
+    assert "OAHINT" in user
