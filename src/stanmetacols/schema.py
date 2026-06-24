@@ -7,10 +7,7 @@ from typing import List
 
 from pydantic import BaseModel
 
-
-class LLMUnavailable(Exception):
-    """The LLM ranking path cannot run (no key, no network, anthropic not
-    installed, API error, or parse failure). Triggers heuristic fallback."""
+from .llm_client import LLMUnavailable  # re-exported; defined in llm_client
 
 
 @dataclass
